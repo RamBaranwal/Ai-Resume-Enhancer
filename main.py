@@ -2,11 +2,11 @@ import os
 import telebot
 import time
 from io import BytesIO
-from pypdf2 import PdfReader
+from pypdf import PdfReader          # ← Changed to pypdf
 from groq import Groq
 from fpdf import FPDF
 
-# ================== ENVIRONMENT VARIABLES ==================
+# ================== ENVIRONMENT VARIABLES (for Render) ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -33,63 +33,69 @@ class PDF(FPDF):
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, 
-        "👋 Welcome!\n\n"
-        "1. Send **Job Description** (text)\n"
-        "2. Send your **Resume PDF**\n\n"
+    bot.reply_to(message,
+        "👋 Welcome to Resume Enhancer Bot!\n\n"
+        "How to use:\n"
+        "1. Send the **Job Description** first (paste text)\n"
+        "2. Send your **Resume as PDF**\n\n"
         "Commands:\n"
-        "/restart - Start over\n"
-        "/exit or /cancel - Same"
+        "/restart - Clear and start over\n"
+        "/exit or /cancel - Clear session"
     )
 
 @bot.message_handler(commands=['restart', 'exit', 'cancel'])
-def handle_restart(message):
+def handle_clear(message):
     user_id = message.from_user.id
     user_data.pop(user_id, None)
-    bot.reply_to(message, "✅ Session cleared! Send a new Job Description.")
+    bot.reply_to(message, "✅ Session cleared! Send a new Job Description to begin.")
 
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def handle_job_description(message):
     if message.text.startswith('/'):
         return
+
     user_id = message.from_user.id
     user_data[user_id] = {"jd": message.text.strip()}
-    bot.reply_to(message, "✅ Job Description saved!\n\nNow send your resume as **PDF**.")
+
+    bot.reply_to(message, 
+        "✅ Job Description saved!\n\n"
+        "Now send your **resume as PDF** file."
+    )
 
 @bot.message_handler(content_types=['document'])
 def handle_pdf(message):
     user_id = message.from_user.id
 
     if user_id not in user_data or "jd" not in user_data[user_id]:
-        bot.reply_to(message, "⚠️ Send Job Description first.\nUse /restart if needed.")
+        bot.reply_to(message, "⚠️ Please send the Job Description first.\nUse /restart or /exit.")
         return
 
     if not message.document.file_name.lower().endswith('.pdf'):
         bot.reply_to(message, "❌ Please send a valid PDF resume.")
         return
 
-    processing_msg = bot.reply_to(message, "⏳ Processing with AI... (10-40 seconds)")
+    processing_msg = bot.reply_to(message, "⏳ Processing your resume with AI... (10-40 seconds)")
 
     try:
         # Download PDF as bytes
         file_info = bot.get_file(message.document.file_id)
         downloaded_bytes = bot.download_file(file_info.file_path)
 
-        # Fix for seek() error
+        # IMPORTANT FIX: Wrap bytes with BytesIO (fixes 'bytes' object has no attribute 'seek')
         pdf_stream = BytesIO(downloaded_bytes)
 
-        # Extract text safely
+        # Use pypdf
         reader = PdfReader(pdf_stream)
         resume_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
-        if len(resume_text) < 50:
-            raise ValueError("Could not extract enough text from the PDF. Try a text-based PDF.")
+        if len(resume_text) < 30:
+            raise ValueError("Could not extract enough text from the PDF. Please use a text-selectable PDF.")
 
         jd = user_data[user_id]["jd"]
 
-        # Truncate if too long (prevent 413 errors)
-        if len(jd) + len(resume_text) > 12000:
-            resume_text = resume_text[:8000] + "\n... [truncated for processing]"
+        # Safety: prevent very large inputs
+        if len(resume_text) > 10000:
+            resume_text = resume_text[:9500]
 
         prompt = f"""You are an expert ATS-friendly resume writer.
 
@@ -99,12 +105,12 @@ Job Description:
 Original Resume:
 {resume_text}
 
-Task: Tailor the resume perfectly for this job.
-- Use exact keywords from the JD naturally
-- Strengthen bullet points (make them achievement-focused)
+Tailor the resume perfectly for this job:
+- Naturally include exact keywords from the JD
+- Strengthen bullet points (achievement-focused)
 - Keep it concise (ideally 1 page)
 - Professional tone, standard sections only
-- Output **only** the complete enhanced resume in clean Markdown."""
+- Output **ONLY** the full enhanced resume in clean Markdown format. No extra comments."""
 
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -115,25 +121,24 @@ Task: Tailor the resume perfectly for this job.
 
         enhanced_md = completion.choices[0].message.content.strip()
 
-        # Generate PDF with better Unicode support
+        # Generate PDF
         pdf = PDF()
         pdf.add_page()
         pdf.set_font("Arial", size=11)
 
         for line in enhanced_md.split('\n'):
-            # Safer encoding to avoid latin-1 errors
             safe_line = line.encode('latin-1', errors='replace').decode('latin-1')
             pdf.multi_cell(0, 6.5, safe_line)
 
         pdf_path = f"enhanced_{user_id}_{int(time.time())}.pdf"
         pdf.output(pdf_path)
 
-        # Send the result
+        # Send enhanced resume
         with open(pdf_path, 'rb') as f:
             bot.send_document(
                 message.chat.id,
                 f,
-                caption="✅ Your tailored resume is ready!\n\nPlease review it before using."
+                caption="✅ Your tailored resume is ready!\n\nPlease review it before submitting."
             )
 
         os.remove(pdf_path)
@@ -142,16 +147,16 @@ Task: Tailor the resume perfectly for this job.
     except Exception as e:
         error_str = str(e).lower()
         if "429" in error_str or "rate limit" in error_str:
-            msg = "❌ Groq rate limit reached. Wait a minute and try again."
+            user_msg = "❌ Groq rate limit reached. Wait 30-60 seconds and try again."
         elif "413" in error_str or "too large" in error_str:
-            msg = "❌ Input too long. Shorten your JD or use a smaller resume PDF."
+            user_msg = "❌ Input too long. Shorten your JD or use a smaller PDF."
         else:
-            msg = f"❌ Error: {str(e)[:150]}\n\nTry /restart and send again."
+            user_msg = f"❌ Error: {str(e)[:180]}\n\nUse /restart or /exit and try again."
 
         bot.edit_message_text(
             chat_id=processing_msg.chat.id,
             message_id=processing_msg.message_id,
-            text=msg
+            text=user_msg
         )
 
 if __name__ == "__main__":
