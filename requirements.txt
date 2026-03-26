@@ -1,1 +1,5 @@
-python-dotenv pyTelegramBotAPI groq pypdf2 fpdf
+python-dotenv
+pyTelegramBotAPI
+groq
+pypdf2
+fpdf
