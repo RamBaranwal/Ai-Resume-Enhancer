@@ -1,11 +1,12 @@
 import os
 import telebot
 import time
-from pypdf import PdfReader
+from io import BytesIO
+from pypdf2 import PdfReader
 from groq import Groq
 from fpdf import FPDF
 
-# ================== LOAD FROM ENVIRONMENT (Perfect for Render) ==================
+# ================== ENVIRONMENT VARIABLES (for Render) ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -15,7 +16,7 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 
-# In-memory storage: user_id -> {"jd": text}
+# In-memory storage
 user_data = {}
 
 # ===========================================
@@ -35,20 +36,18 @@ class PDF(FPDF):
 def send_welcome(message):
     bot.reply_to(message, 
         "👋 Welcome to Resume Enhancer Bot!\n\n"
-        "Workflow:\n"
-        "1. Send the **Job Description** (paste text)\n"
-        "2. Send your **Resume as PDF**\n\n"
+        "How it works:\n"
+        "1. Send the **Job Description** first\n"
+        "2. Then send your **Resume as PDF**\n\n"
         "Commands:\n"
-        "/restart - Clear current JD and start over\n"
-        "/exit or /cancel - Same as restart\n\n"
-        "Send /start anytime to see this message."
+        "/restart  - Clear and start over\n"
+        "/exit or /cancel - Same as restart"
     )
 
 @bot.message_handler(commands=['restart', 'exit', 'cancel'])
 def handle_restart(message):
     user_id = message.from_user.id
-    if user_id in user_data:
-        del user_data[user_id]
+    user_data.pop(user_id, None)
     bot.reply_to(message, "✅ Session cleared! Send a new Job Description to begin.")
 
 @bot.message_handler(func=lambda m: True, content_types=['text'])
@@ -60,9 +59,8 @@ def handle_job_description(message):
     user_data[user_id] = {"jd": message.text.strip()}
 
     bot.reply_to(message, 
-        "✅ Job Description received and saved!\n\n"
-        "Now send your **resume as PDF** file.\n"
-        "Use /restart if you want to change the JD."
+        "✅ Job Description saved!\n\n"
+        "Now send your **resume PDF** file."
     )
 
 @bot.message_handler(content_types=['document'])
@@ -70,21 +68,25 @@ def handle_pdf(message):
     user_id = message.from_user.id
 
     if user_id not in user_data or "jd" not in user_data[user_id]:
-        bot.reply_to(message, "⚠️ Please send the Job Description first.\nUse /restart to clear if needed.")
+        bot.reply_to(message, "⚠️ Please send the Job Description first.\nUse /restart if needed.")
         return
 
     if not message.document.file_name.lower().endswith('.pdf'):
-        bot.reply_to(message, "❌ Please upload a valid PDF resume.")
+        bot.reply_to(message, "❌ Please send a valid PDF resume.")
         return
 
-    processing_msg = bot.reply_to(message, "⏳ Processing your resume with AI... (10-30 seconds)")
+    processing_msg = bot.reply_to(message, "⏳ Downloading & processing with AI... (10-30 seconds)")
 
     try:
-        # Download and extract PDF text
+        # Download file as bytes
         file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        downloaded_bytes = bot.download_file(file_info.file_path)
 
-        reader = PdfReader(downloaded_file)
+        # Fix: Wrap bytes with BytesIO so it supports .seek()
+        pdf_stream = BytesIO(downloaded_bytes)
+
+        # Extract text
+        reader = PdfReader(pdf_stream)
         resume_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
         jd = user_data[user_id]["jd"]
@@ -97,12 +99,12 @@ Job Description:
 Original Resume:
 {resume_text}
 
-Tailor the resume perfectly for this job:
-- Include exact keywords from the JD naturally
-- Make bullets strong and achievement-focused
+Tailor the resume perfectly:
+- Naturally use exact keywords from the JD
+- Make bullet points strong and achievement-oriented
 - Keep it concise (ideally 1 page)
 - Professional tone, standard sections only
-- Output **only** the full enhanced resume in clean Markdown."""
+- Output **only** the full enhanced resume in clean Markdown format."""
 
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -113,7 +115,7 @@ Tailor the resume perfectly for this job:
 
         enhanced_md = completion.choices[0].message.content.strip()
 
-        # Create PDF
+        # Generate PDF
         pdf = PDF()
         pdf.add_page()
         pdf.set_font("Arial", size=11)
@@ -125,25 +127,24 @@ Tailor the resume perfectly for this job:
         pdf_path = f"enhanced_{user_id}_{int(time.time())}.pdf"
         pdf.output(pdf_path)
 
-        # Send enhanced resume
+        # Send result
         with open(pdf_path, 'rb') as f:
             bot.send_document(
                 message.chat.id,
                 f,
-                caption="✅ Your AI-tailored resume is ready!\n\nReview it before submitting."
+                caption="✅ Your tailored resume is ready!\n\nReview before submitting."
             )
 
         os.remove(pdf_path)
-        user_data.pop(user_id, None)  # Auto clear after success
+        user_data.pop(user_id, None)   # Auto clear after success
 
     except Exception as e:
         bot.edit_message_text(
             chat_id=processing_msg.chat.id,
             message_id=processing_msg.message_id,
-            text=f"❌ Error: {str(e)}\nTry /restart and send again."
+            text=f"❌ Error: {str(e)}\n\nTry /restart and send again."
         )
 
-# ====================== RUN THE BOT ======================
 if __name__ == "__main__":
-    print("🚀 Resume Enhancer Bot started successfully...")
+    print("🚀 Resume Enhancer Bot is running...")
     bot.infinity_polling()
