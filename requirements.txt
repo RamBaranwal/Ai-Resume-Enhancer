@@ -1,5 +1,5 @@
 python-dotenv
 pyTelegramBotAPI
 groq
-pypdf2
+pypdf
 fpdf

@@ -1,7 +1,7 @@
 import os
 import telebot
 import time
-from pypdf2 import PdfReader
+from pypdf import PdfReader
 from groq import Groq
 from fpdf import FPDF
 
