@@ -3,3 +3,5 @@ pyTelegramBotAPI
 groq
 pypdf
 fpdf
+markdown
+xhtml2pdf
